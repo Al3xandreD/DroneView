@@ -1,0 +1,22 @@
+model:
+  embed_dim: 768
+  M: 4
+
+data:
+  train:
+    image_path: "data.nosync/Train/images"
+    annotation_path: "data.nosync/Train/labelTxt-v1.5/DOTA-v1.5_train"
+  val:
+    image_path: "data.nosync/Val/images"
+    annotation_path: "data.nosync/Val/labelTxt-v1.5/DOTA-v1.5_val"
+  test:
+    image_path:  "data.nosync/Test/images"
+    annotation_path: "data.nosync/Test/test_info.json"
+  new_image_size: [224, 224]
+  num_patches: 14
+
+training:
+  epochs: 50
+  batch_size: 32
+  lr: 0.0001
+  num_workers: 2
