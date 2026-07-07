@@ -32,6 +32,8 @@ def merge_configs(config, args):
         config['training']['batch_size'] = args.batch_size
     if args.lr:
         config['training']['lr'] = args.lr
+    if args.warmup_epochs:
+        config['training']['warmup_epochs'] = args.warmup_epochs
     # image args
     if args.img_height:
         config['data']['new_image_size'][0] = args.img_height

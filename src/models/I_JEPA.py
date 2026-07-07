@@ -1,3 +1,4 @@
+import math
 import random
 
 import lightning as L
@@ -5,17 +6,20 @@ import torch
 from torch import nn
 
 from torchvision.models import vit_b_16
-from src.data.preprocess import makePatches
 
 class IJEPA(L.LightningModule):
-    def __init__(self, M, lr=1e-3, ema_momentum=0.996, target_scale=(0.15, 0.2), target_ratio=(0.75, 1.5), context_scale=(0.85, 1.0)):
+    def __init__(self, M, lr=1e-3, warmup_start_lr=1e-4, final_lr=1e-6, warmup_epochs=5,
+                 ema_momentum=0.996, target_scale=(0.15, 0.2), target_ratio=(0.75, 1.5), context_scale=(0.85, 1.0)):
         super(IJEPA, self).__init__()
         # saving the constructor args as hyperparameters so the model can be
         # rebuilt with IJEPA.load_from_checkpoint(...)
         self.save_hyperparameters()
         # attributes
         self.M = M # number of sampled targets
-        self.lr = lr
+        self.lr = lr # peak learning rate reached at the end of warmup
+        self.warmup_start_lr = warmup_start_lr # learning rate at the start of warmup
+        self.final_lr = final_lr # learning rate the cosine schedule decays to
+        self.warmup_epochs = warmup_epochs # number of epochs to ramp lr from warmup_start_lr to lr
         self.ema_momentum = ema_momentum # EMA decay for the target encoder
         self.target_scale = target_scale
         self.target_ratio = target_ratio
@@ -212,14 +216,69 @@ class IJEPA(L.LightningModule):
         self.log("test_loss", loss, prog_bar=True)
         return loss
 
+    @torch.no_grad()
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        '''
+        Extract the learned image representation for inference / downstream use.
+        Unlike the train/val/test steps, no masking is applied: the full image
+        is encoded by the (EMA) target encoder — the stable representation used
+        for downstream tasks in I-JEPA. Returns per-patch tokens so a detection
+        head can consume the spatial grid; mean-pool over dim=1 for a single
+        (B, D) image embedding instead.
+        :param batch: from collate_fn -> (images, boxes, labels, difficulties)
+        :return: (B, N, D) per-patch representations
+        '''
+        y = batch[0] if isinstance(batch, (list, tuple)) else batch
+        patches = self._embed(self.target_encoder, y)          # (B, N, D)
+        representation = self._transformer(self.target_encoder, patches)
+        return representation
+
+    def _lr_lambda(self, epoch):
+        '''
+        Multiplicative factor applied to the peak lr (self.lr) for a given epoch.
+        Linear warmup from warmup_start_lr up to lr over warmup_epochs, then a
+        cosine decay from lr down to final_lr over the remaining epochs.
+        Returns a factor in [0, 1] so that factor * self.lr yields the target lr.
+        :param epoch: current epoch index (0-based)
+        :return: multiplicative factor for the peak learning rate
+        '''
+        if epoch < self.warmup_epochs:
+            # linear warmup: warmup_start_lr -> lr
+            warmup = self.warmup_start_lr + (self.lr - self.warmup_start_lr) * (epoch / max(1, self.warmup_epochs))
+            return warmup / self.lr
+        # cosine decay: lr -> final_lr over the epochs after warmup
+        max_epochs = self.trainer.max_epochs
+        if max_epochs is None or max_epochs < 0:
+            # no finite horizon set: hold at peak lr rather than decaying blindly
+            return 1.0
+        total_decay_epochs = max(1, max_epochs - self.warmup_epochs)
+        progress = (epoch - self.warmup_epochs) / total_decay_epochs
+        progress = min(1.0, max(0.0, progress))
+        decayed = self.final_lr + 0.5 * (self.lr - self.final_lr) * (1.0 + math.cos(math.pi * progress))
+        return decayed / self.lr
+
     def configure_optimizers(self):
         '''
         Optimizer over the trainable parameters only (the target encoder is
-        frozen and updated by EMA, so it is excluded).
+        frozen and updated by EMA, so it is excluded), together with a per-epoch
+        learning rate schedule: linear warmup (warmup_start_lr -> lr) followed by
+        cosine decay (lr -> final_lr). Returned in Lightning's optimizer/scheduler
+        format so the schedule is stepped and checkpointed automatically.
         :return:
         '''
         params = [p for p in self.parameters() if p.requires_grad]
-        return torch.optim.AdamW(params, lr=self.lr)
+        # AdamW is created at the peak lr; the scheduler's multiplicative factor
+        # scales it each epoch (starting below 1.0 during warmup).
+        optimizer = torch.optim.AdamW(params, lr=self.lr)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=self._lr_lambda)
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",   # step the schedule once per epoch
+                "frequency": 1,
+            },
+        }
 
 
 

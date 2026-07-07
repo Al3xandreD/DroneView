@@ -3,8 +3,9 @@ import matplotlib.pyplot as plt
 
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
-from torch import tensor
+from torch import tensor, float32
 from torchvision.io import decode_image
+from torchvision.io import ImageReadMode
 
 from src.utils.paths import DATA
 from src.data.preprocess import get_im_transforms, scale_boxes
@@ -28,14 +29,15 @@ class DOTADataset(Dataset):
         # image
         image_name = self.image_files[index]
         image_path = os.path.join(self.images_dir, image_name)
-        image = decode_image(image_path)
+        image = decode_image(image_path, mode=ImageReadMode.RGB)
 
         # annotation
         annotation_name = os.path.splitext(image_name)[0] + '.txt'
         annotation_path = os.path.join(self.annotation_path, annotation_name)
 
         boxes, labels, difficulties = self.parse_annotation(annotation_path)
-        boxes = tensor(boxes)
+        boxes = tensor(boxes, dtype=float32).reshape(-1, 8) # reshape keeps images with no annotations as (0, 8) instead of (0,)
+
 
         # transforms
         orig_size = image.size()[1:]    # discarding channels in the size
@@ -78,12 +80,9 @@ class DOTADataset(Dataset):
 if __name__ == '__main__':
     annotation_path = DATA / "Train/labelTxt-v1.5/DOTA-v1.5_train"
     images_dir = DATA / "Train/images"
+    image_size = (1024, 1024)
 
-    transform = transforms.Compose([
-        transforms.Resize((800, 800)),
-    ])
-
-    dataset = DOTADataset(annotation_path, images_dir, transform_image=transform)
+    dataset = DOTADataset(annotation_path, images_dir)
 
     batch_size = 1
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
