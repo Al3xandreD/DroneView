@@ -1,6 +1,5 @@
 model:
-  embed_dim: 768
-  M: 4
+  path2ijepa: "models.nosync/ijepa_checkpoints/ijepa-epoch=37-val_loss=0.0000.ckpt"
 
 data:
   train:
@@ -19,5 +18,4 @@ training:
   epochs: 50
   batch_size: 32
   lr: 0.001          # peak learning rate reached at the end of warmup
-  warmup_epochs: 5   # epochs to linearly ramp lr from warmup_start_lr up to lr
   num_workers: 2

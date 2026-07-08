@@ -8,7 +8,7 @@ from src.utils.config_loader import load_config
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/config.yaml")
+    parser.add_argument("--config", default="configs/config_ijepa.yaml")
     parser.add_argument("--split", default="train", choices=["train", "val", "test"])
     args = parser.parse_args()
 

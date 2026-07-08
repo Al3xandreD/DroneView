@@ -32,7 +32,7 @@ def merge_configs(config, args):
         config['training']['batch_size'] = args.batch_size
     if args.lr:
         config['training']['lr'] = args.lr
-    if args.warmup_epochs:
+    if getattr(args, "warmup_epochs", None):
         config['training']['warmup_epochs'] = args.warmup_epochs
     # image args
     if args.img_height:
