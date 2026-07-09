@@ -2,9 +2,22 @@ import os
 
 import torch
 from torch.utils.data import DataLoader
-from torchvision.io import decode_image
+from torchvision.io import decode_image, ImageReadMode
 
 from src.data.DOTADataset import DOTADataset
+from src.data.preprocess import get_im_transforms
+
+
+def load_image(image_path, new_size):
+    '''
+    Load and preprocess a single image the same way DOTADataset does, so it can
+    be fed straight to the model for single-image inference.
+    :param image_path: path to an image file
+    :param new_size: (H, W) the image is resized to
+    :return: (C, H, W) float tensor
+    '''
+    image = decode_image(image_path, mode=ImageReadMode.RGB)
+    return get_im_transforms(new_size)(image)
 
 def collate_fn(batch):
     '''

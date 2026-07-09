@@ -1,17 +1,11 @@
 import argparse
-import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, DeviceStatsMonitor, LearningRateMonitor
 
-from matplotlib import pyplot as plt
-from torchvision.utils import draw_bounding_boxes
+import torch
 
-from src.models.Detector import Detector
+from src.data.data import get_dataloaders, load_image
+from src.models.I_JEPA import IJEPA
 from src.training.runner import build_trainer
 from src.utils.config_loader import load_config, merge_configs
-from src.data.data import get_dataloaders
-from src.models.I_JEPA import IJEPA
-from lightning.pytorch.loggers import TensorBoardLogger
-
 from src.utils.plots import plot_boxes, plot_representations
 
 if __name__ == '__main__':
@@ -27,6 +21,7 @@ if __name__ == '__main__':
     parser.add_argument("--test", action="store_true", default=False)
     parser.add_argument("--predict", action="store_true", default=False)
     parser.add_argument("--ckpt", default=None, help="checkpoint path to load for testing")
+    parser.add_argument("--image", default=None, help="path to a single image to run --predict on")
     parser.add_argument("--show_sample", action="store_true", default=False, help="display a sample image with its bounding boxes before running")
     args = parser.parse_args()
 
@@ -75,14 +70,23 @@ if __name__ == '__main__':
         if args.ckpt is None:
             raise ValueError("--predict requires --ckpt pointing to a trained checkpoint")
 
-        trainer = build_trainer(log_dir="outputs.nosync/ijepa_outputs", log_name="ijepa_pred_log",
-                                log_version="version_" + args.ckpt,
-                                training=False)
-
         model = IJEPA.load_from_checkpoint(args.ckpt)
         model.eval()
 
-        predictions = trainer.predict(model, test_loader)
-        plot_representations(predictions[0], 0)
+        # single-image inference: run the model directly, no Trainer / dataloader
+        if args.image is not None:
+            image = load_image(args.image, config['data']['new_image_size'])
+        else:
+            # fall back to the first image of the (val) test loader
+            image = next(iter(test_loader))[0][0]
+
+        with torch.no_grad():
+            representation = model(image.unsqueeze(0).to(model.device))  # (1, N, D)
+
+        representation = representation.squeeze(0).cpu()                  # (N, D)
+
+        print(f"representation: shape={tuple(representation.shape)} "
+              f"mean={representation.mean():.4f} std={representation.std():.4f}")
+        plot_representations(representation)
 
 

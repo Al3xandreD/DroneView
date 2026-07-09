@@ -213,21 +213,27 @@ class IJEPA(L.LightningModule):
         self.log("test_loss", loss, prog_bar=True)
         return loss
 
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        '''
+        Encode full images with the (frozen) target encoder, no masking applied.
+        This is the representation used for inference / downstream detection.
+        Returns per-patch tokens so a detection head can consume the spatial grid;
+        mean-pool over dim=1 for a single (B, D) image embedding instead.
+        :param images: (B, C, H, W)
+        :return: (B, N, D) per-patch representations
+        '''
+        patches = self._embed(self.target_encoder, images)          # (B, N, D)
+        return self._transformer(self.target_encoder, patches)      # (B, N, D)
+
     @torch.no_grad()
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         '''
         Extract the learned image representation for inference / downstream use.
-        Unlike the train/val/test steps, no masking is applied: the full image
-        is encoded by the target encoder.
-        Returns per-patch tokens so a detection head can consume the spatial grid;
-        mean-pool over dim=1 for a single (B, D) image embedding instead.
         :param batch: from collate_fn -> (images, boxes, labels, difficulties)
         :return: (B, N, D) per-patch representations
         '''
         y = batch[0] if isinstance(batch, (list, tuple)) else batch
-        patches = self._embed(self.target_encoder, y)          # (B, N, D)
-        representation = self._transformer(self.target_encoder, patches) # (B, N, D)
-        return representation
+        return self(y)
 
     def _lr_lambda(self, epoch):
         '''
