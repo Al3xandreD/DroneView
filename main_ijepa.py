@@ -12,6 +12,8 @@ from src.data.data import get_dataloaders
 from src.models.I_JEPA import IJEPA
 from lightning.pytorch.loggers import TensorBoardLogger
 
+from src.utils.plots import plot_boxes, plot_representations
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/config_ijepa.yaml")
@@ -39,10 +41,7 @@ if __name__ == '__main__':
 
     if args.show_sample and train_loader is not None:
         train_images, train_boxes, train_labels, train_difficulties = next(iter(train_loader))
-        image = draw_bounding_boxes(train_images[0], train_boxes[0], labels=train_labels[0])
-        plt.imshow(image.permute(1, 2, 0).numpy())
-        plt.title(f"Train Image using ground truth bounding boxes")
-        plt.show()
+        plot_boxes(train_images[0], train_boxes[0], train_labels[0])
 
     if args.train:
         # tensorboard logger
@@ -76,13 +75,14 @@ if __name__ == '__main__':
         if args.ckpt is None:
             raise ValueError("--predict requires --ckpt pointing to a trained checkpoint")
 
-        trainer = build_trainer(log_dir="outputs.nosync/ijepa_outputs", log_name="ijepa_test_log",
+        trainer = build_trainer(log_dir="outputs.nosync/ijepa_outputs", log_name="ijepa_pred_log",
                                 log_version="version_" + args.ckpt,
                                 training=False)
 
         model = IJEPA.load_from_checkpoint(args.ckpt)
         model.eval()
 
-        prediction = trainer.predict(model, test_loader)
+        predictions = trainer.predict(model, test_loader)
+        plot_representations(predictions[0], 0)
 
 

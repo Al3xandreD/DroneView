@@ -43,12 +43,12 @@ class IJEPA(L.LightningModule):
             p.requires_grad_(False)
 
     @staticmethod
-    def _embed(vit, imgs):
+    def _embed(vit, imgs: torch.Tensor) -> torch.Tensor:
         '''
         Embedding the images to get the patches with positions tokens
         :param vit:
-        :param imgs: input images (B, C, H, W)
-        :return: patches with positions tokens (B, N, h, w)
+        :param imgs: input images (B, C, H, W), batch, number of channels, image height, image width
+        :return: patches with positions tokens (B, N, h, w), batch, number of patches, patch height, patch width
         '''
 
         x = vit.conv_proj(imgs) # (B, D, h, w)
@@ -58,17 +58,14 @@ class IJEPA(L.LightningModule):
         return x
 
     @staticmethod
-    def _transformer(vit, x):
+    def _transformer(vit, x:torch.Tensor) -> torch.Tensor:
         '''
-        Passes tensor x through the encoder layers of a vit. Bypassing the conv layer and head present in the pytorch implementation
-        :param vit:
+        Passes tensor x through the encoder layers of a vit.
+        Bypassing the conv layer and head present in the pytorch implementation
+        :param vit: pytorch vit model
         :param x:
         :return:
         '''
-        # position embeddings are already added in _embed and the sequence length
-        # here is variable (masked context + mask tokens), so we run the encoder
-        # layers directly instead of vit.encoder(x), which would re-add a fixed
-        # length-(N+1) positional embedding and crash on these shapes.
         x = vit.encoder.dropout(x)
         x = vit.encoder.layers(x)
         x = vit.encoder.ln(x)
@@ -76,8 +73,8 @@ class IJEPA(L.LightningModule):
     def _get1block_indices(self,  gh, gw, scale:tuple[float, float], ratio:tuple[float, float]):
         '''
         Randomly sample a block inside the image with given scale and ratio, and returns the indices of the patches within the block
-        :param gh:
-        :param gw:
+        :param gh: number of patches on height axis
+        :param gw: number of patches on width axis
         :param scale:
         :param ratio:
         :return:
@@ -129,11 +126,11 @@ class IJEPA(L.LightningModule):
 
         with torch.no_grad():
             # target encoder side
-            target_patches = self._embed(self.target_encoder, y)
-            s_y = self._transformer(self.target_encoder, target_patches)
-            idx_target = self._block_indices(gh, gw, self.target_scale, self.target_ratio)
+            target_patches = self._embed(self.target_encoder, y) # patches out of the encoder
+            s_y = self._transformer(self.target_encoder, target_patches) # representation out of vit
+            idx_target = self._block_indices(gh, gw, self.target_scale, self.target_ratio) # indices of sampled M target patches in the blocks
             idx_target = torch.cat(idx_target, dim=0).unique(dim=0).to(device) # union of all target patch indices
-            sampled_y = s_y[:, idx_target] # (B, n_target, D) representations to predict
+            sampled_y = s_y[:, idx_target] # (B, n_target, D) sampled block representations to predict
 
             # sampling one context block and removing the target patches from it
             idx_context = self._get1block_indices(gh, gw, self.context_scale, self.context_ratio)
@@ -221,16 +218,15 @@ class IJEPA(L.LightningModule):
         '''
         Extract the learned image representation for inference / downstream use.
         Unlike the train/val/test steps, no masking is applied: the full image
-        is encoded by the (EMA) target encoder — the stable representation used
-        for downstream tasks in I-JEPA. Returns per-patch tokens so a detection
-        head can consume the spatial grid; mean-pool over dim=1 for a single
-        (B, D) image embedding instead.
+        is encoded by the target encoder.
+        Returns per-patch tokens so a detection head can consume the spatial grid;
+        mean-pool over dim=1 for a single (B, D) image embedding instead.
         :param batch: from collate_fn -> (images, boxes, labels, difficulties)
         :return: (B, N, D) per-patch representations
         '''
         y = batch[0] if isinstance(batch, (list, tuple)) else batch
         patches = self._embed(self.target_encoder, y)          # (B, N, D)
-        representation = self._transformer(self.target_encoder, patches)
+        representation = self._transformer(self.target_encoder, patches) # (B, N, D)
         return representation
 
     def _lr_lambda(self, epoch):

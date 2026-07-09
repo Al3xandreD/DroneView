@@ -52,11 +52,14 @@ def get_dataloaders(args, config):
         loaders['val'] = val_dataloader
 
 
-    if args.test:
-        test_dataset = DOTADataset(config['data']['test']['annotation_path'],
-                                   config['data']['test']['image_path'],
+    if args.test or args.predict:
+        # DOTA's test split ships no public ground-truth boxes, evaluate on
+        # the val split (which has boxes) instead. Reported detection metrics are
+        # therefore validation-set numbers, not held-out test numbers.
+        test_dataset = DOTADataset(config['data']['val']['annotation_path'],
+                                   config['data']['val']['image_path'],
                                    config['data']['new_image_size'])
-        test_dataloader = DataLoader(test_dataset, batch_size=config['training']['batch_size'], shuffle=True, collate_fn=collate_fn, num_workers=config['training']['num_workers'], persistent_workers=True)
+        test_dataloader = DataLoader(test_dataset, batch_size=config['training']['batch_size'], shuffle=False, collate_fn=collate_fn, num_workers=config['training']['num_workers'], persistent_workers=True)
         loaders['test'] = test_dataloader
 
     return loaders
