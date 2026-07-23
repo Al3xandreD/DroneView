@@ -1,7 +1,6 @@
 import os
 import matplotlib.pyplot as plt
 
-from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 from torch import tensor, float32
 from torchvision.io import decode_image

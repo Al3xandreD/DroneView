@@ -1,6 +1,5 @@
 import torch
 
-from torch.nn.functional import unfold
 from torchvision.transforms import v2
 
 def scale_boxes(boxes: torch.Tensor, orig_size, new_size) -> torch.Tensor:

@@ -3,9 +3,10 @@ import argparse
 import torch
 
 from src.data.data import get_dataloaders, load_image
-from src.models.Detector import Detector
+from src.models.Detector import DOTA_CLASSES, Detector
 from src.training.runner import build_trainer
 from src.utils.config_loader import load_config, merge_configs
+from src.utils.plots import plot_detections
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -19,6 +20,8 @@ if __name__ == "__main__":
     parser.add_argument("--test", action="store_true", default=False)
     parser.add_argument("--predict", action="store_true", default=False)
     parser.add_argument("--image", default=None, help="path to a single image to run --predict on")
+    parser.add_argument("--score_thr", type=float, default=0.5,
+                        help="minimum class score for a detection to be printed/drawn")
     parser.add_argument("--ckpt", default=None, help="checkpoint path to load for testing")
     args = parser.parse_args()
 
@@ -72,12 +75,17 @@ if __name__ == "__main__":
             image = next(iter(test_loader))[0][0]
 
         with torch.no_grad():
-            pred_boxes = model(image.unsqueeze(0).to(model.device))  # (B, K, 8)
+            # list (len B) of {'boxes': (K,4), 'scores': (K,), 'labels': (K,)}
+            detections = model(image.unsqueeze(0).to(model.device))
 
+        detection = {k: v.cpu() for k, v in detections[0].items()}
+        keep = detection['scores'] >= args.score_thr
+        print(f"{int(keep.sum())} detections above {args.score_thr} "
+              f"(of {detection['scores'].numel()} returned)")
+        for box, score, label in zip(detection['boxes'][keep].tolist(),
+                                     detection['scores'][keep].tolist(),
+                                     detection['labels'][keep].tolist()):
+            x1, y1, x2, y2 = (round(c, 1) for c in box)
+            print(f"  {DOTA_CLASSES[label]:<20} {score:.3f}  [{x1}, {y1}, {x2}, {y2}]")
 
-
-
-        prediction = trainer.predict(model, test_loader)
-
-
-
+        plot_detections(image, detection, DOTA_CLASSES, score_thr=args.score_thr)

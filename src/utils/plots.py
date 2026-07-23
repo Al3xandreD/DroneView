@@ -9,6 +9,35 @@ def plot_boxes(image, boxes, label):
     plt.title(f"Train Image using ground truth bounding boxes")
     plt.show()
 
+def plot_detections(image, detection, class_names, score_thr=0.5, title=None):
+    '''
+    Draw the Detector's output for a single image: axis-aligned boxes annotated
+    with "class score". Detections below score_thr are hidden, since the ROI head
+    emits up to detections_per_img boxes and most of them are low-confidence.
+    :param image: (C, H, W) float tensor in [0, 1], as produced by the transforms
+    :param detection: dict {'boxes': (K,4), 'scores': (K,), 'labels': (K,)}
+    :param class_names: sequence indexed by the label ids
+    '''
+    image = (image.detach().cpu().clamp(0, 1) * 255).to(torch.uint8)
+    boxes = detection['boxes'].detach().cpu()
+    scores = detection['scores'].detach().cpu()
+    labels = detection['labels'].detach().cpu()
+
+    keep = scores >= score_thr
+    boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
+
+    if boxes.numel() == 0:
+        plt.imshow(image.permute(1, 2, 0).numpy())
+        plt.title(title or f"No detection above {score_thr}")
+    else:
+        tags = [f"{class_names[l]} {s:.2f}" for l, s in zip(labels.tolist(), scores.tolist())]
+        drawn = draw_bounding_boxes(image, boxes, labels=tags, colors="red", width=2)
+        plt.imshow(drawn.permute(1, 2, 0).numpy())
+        plt.title(title or f"{boxes.shape[0]} detections (score >= {score_thr})")
+    plt.axis('off')
+    plt.show()
+
+
 def plot_representations(representation):
     '''
     Visualize the per-patch target-encoder representation of a single image.
