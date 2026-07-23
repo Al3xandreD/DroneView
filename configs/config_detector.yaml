@@ -17,5 +17,5 @@ data:
 training:
   epochs: 50
   batch_size: 32
-  lr: 0.001          # peak learning rate reached at the end of warmup
+  lr: 0.00001
   num_workers: 2

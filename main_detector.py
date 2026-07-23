@@ -1,6 +1,8 @@
 import argparse
 
-from src.data.data import get_dataloaders
+import torch
+
+from src.data.data import get_dataloaders, load_image
 from src.models.Detector import Detector
 from src.training.runner import build_trainer
 from src.utils.config_loader import load_config, merge_configs
@@ -16,6 +18,7 @@ if __name__ == "__main__":
     parser.add_argument("--train", action="store_true", default=False)
     parser.add_argument("--test", action="store_true", default=False)
     parser.add_argument("--predict", action="store_true", default=False)
+    parser.add_argument("--image", default=None, help="path to a single image to run --predict on")
     parser.add_argument("--ckpt", default=None, help="checkpoint path to load for testing")
     args = parser.parse_args()
 
@@ -59,12 +62,20 @@ if __name__ == "__main__":
         if args.ckpt is None:
             raise ValueError("--predict requires --ckpt pointing to a trained checkpoint")
 
-        trainer = build_trainer(log_dir="outputs.nosync/detector_outputs", log_name="detector_test_log",
-                                log_version="version_" + args.ckpt,
-                                training=False)
-
         model = Detector.load_from_checkpoint(args.ckpt)
         model.eval()
+
+        if args.image is not None:
+            image = load_image(args.image, config['data']['new_image_size'])
+        else:
+            # fall back to the first image of the (val) test loader
+            image = next(iter(test_loader))[0][0]
+
+        with torch.no_grad():
+            pred_boxes = model(image.unsqueeze(0).to(model.device))  # (B, K, 8)
+
+
+
 
         prediction = trainer.predict(model, test_loader)
 
