@@ -5,7 +5,9 @@ from torch.utils.data import DataLoader
 from torchvision.io import decode_image, ImageReadMode
 
 from src.data.DOTADataset import DOTADataset
+from src.data.FeatureDataset import FeatureDataset, feature_collate_fn
 from src.data.preprocess import get_im_transforms
+from src.utils.paths import DATA
 
 
 def load_image(image_path, new_size):
@@ -32,24 +34,45 @@ def collate_fn(batch):
 
     return images, boxes, labels, difficulties
 
-def find_single_channel_images(dataset):
+def feature_cache_dir(config, split):
     '''
-    Find images in a DOTADataset that have only one channel (grayscale).
-    Reads each image directly from disk to inspect its channel count without
-    applying the dataset transforms.
-    :param dataset: DOTADataset object
-    :return: list of image filenames that have a single channel
+    Directory of cached feature records for a split, matching the layout written
+    by scripts/cache_features.py: <root>/<split>. The root comes from
+    config['data']['feature_cache'] if set, else data.nosync/feature_cache.
     '''
-    single_channel = []
-    for image_name in dataset.image_files:
-        image_path = os.path.join(dataset.images_dir, image_name)
-        image = decode_image(image_path)   # shape: (C, H, W)
-        if image.size(0) == 1:
-            single_channel.append(image_name)
+    root = config['data'].get('feature_cache') or (DATA / 'feature_cache')
+    return os.path.join(str(root), split)
 
-    return single_channel
+def get_feature_dataloaders(args, config):
+    '''
+    Build dataloaders over precomputed backbone features (FeatureDataset) instead
+    of raw images, for training the detection heads without the frozen encoder in
+    the loop. Mirrors get_dataloaders' splits; the test/predict loaders reuse the
+    val cache, following the same val-as-test convention as the image path.
+    '''
+    loaders = {}
+    bs = config['training']['batch_size']
+    nw = config['training']['num_workers']
+
+    def make(split, shuffle):
+        dataset = FeatureDataset(feature_cache_dir(config, split))
+        return DataLoader(dataset, batch_size=bs, shuffle=shuffle,
+                          collate_fn=feature_collate_fn, num_workers=nw,
+                          persistent_workers=True)
+
+    if args.train:
+        loaders['train'] = make('train', shuffle=True)
+        loaders['val'] = make('val', shuffle=False)
+    if args.test:
+        # DOTA's test split has no public boxes; evaluate on the val cache
+        loaders['test'] = make('val', shuffle=False)
+    return loaders
 
 def get_dataloaders(args, config):
+    # cached-feature training/eval path skips image loading entirely
+    if getattr(args, 'use_features', False) and not args.predict:
+        return get_feature_dataloaders(args, config)
+
     loaders = {} # dict of loaders
     if args.train:
         train_dataset = DOTADataset(config['data']['train']['annotation_path'],

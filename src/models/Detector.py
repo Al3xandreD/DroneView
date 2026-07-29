@@ -22,10 +22,17 @@ class ROIHead(nn.Module):
     Second stage: classify each RPN proposal and refine its box.
 
     Where the RPN answers "is there *something* here", this head answers "what
-    is it, and where exactly". Each proposal is pooled from the shared feature
-    map into a fixed pool_size x pool_size patch (so a variable number of
-    variably-sized boxes becomes a fixed-width tensor an MLP can consume),
-    flattened, and pushed through a two-layer MLP with two sibling linear heads:
+    is it, and where exactly". The shared feature map is first passed through a
+    1x1 conv that projects the backbone's in_channels (768) down to
+    reduce_channels (256): the flattened ROI vector fed to the MLP is
+    reduce_channels * pool_size**2 wide, so this projection shrinks the first
+    Linear (by far the head's largest layer) by the same factor, and it runs
+    once per image on the 14x14 map rather than once per proposal.
+
+    Each proposal is then pooled from that reduced map into a fixed
+    pool_size x pool_size patch (so a variable number of variably-sized boxes
+    becomes a fixed-width tensor an MLP can consume), flattened, and pushed
+    through a two-layer MLP with two sibling linear heads:
       - cls_score: (C + 1) logits, background at index 0
       - bbox_pred: 4 deltas *per class*, so the refinement can be
         category-specific (a harbor and a small-vehicle are not adjusted alike)
@@ -35,7 +42,7 @@ class ROIHead(nn.Module):
     '''
 
     def __init__(self, in_channels, num_classes, spatial_scale,
-                 pool_size=7, mid_channels=1024,
+                 pool_size=7, mid_channels=512, reduce_channels=256,
                  # training-time proposal assignment / sampling
                  fg_iou_thr=0.5, num_samples=512, pos_fraction=0.25,
                  # inference-time filtering
@@ -51,8 +58,12 @@ class ROIHead(nn.Module):
         self.nms_thr = nms_thr
         self.detections_per_img = detections_per_img
 
+        # 1x1 channel reduction applied to the whole feature map before pooling;
+        # a 1x1 conv keeps the spatial size, so spatial_scale is unchanged.
+        self.channel_reduce = nn.Conv2d(in_channels, reduce_channels, kernel_size=1)
+
         self.mlp = nn.Sequential(
-            nn.Linear(in_channels * pool_size * pool_size, mid_channels),
+            nn.Linear(reduce_channels * pool_size * pool_size, mid_channels),
             nn.ReLU(inplace=True),
             nn.Linear(mid_channels, mid_channels),
             nn.ReLU(inplace=True),
@@ -60,6 +71,8 @@ class ROIHead(nn.Module):
         self.cls_score = nn.Linear(mid_channels, num_classes + 1)
         self.bbox_pred = nn.Linear(mid_channels, (num_classes + 1) * 4)
 
+        nn.init.normal_(self.channel_reduce.weight, std=0.01)
+        nn.init.constant_(self.channel_reduce.bias, 0.0)
         for layer in self.mlp:
             if isinstance(layer, nn.Linear):
                 nn.init.normal_(layer.weight, std=0.01)
@@ -82,6 +95,7 @@ class ROIHead(nn.Module):
         :return: cls_logits (sum P_i, C+1), deltas (sum P_i, (C+1)*4)
                  rows concatenated in image order
         '''
+        feat = self.channel_reduce(feat)                     # (B, reduce_channels, H, W)
         rois = roi_align(feat, proposals, output_size=self.pool_size,
                          spatial_scale=self.spatial_scale, sampling_ratio=2,
                          aligned=True)                       # (sum P_i, C, pool, pool)
@@ -210,7 +224,8 @@ class Detector(L.LightningModule):
     '''
 
     def __init__(self, path2ijepa, lr=1e-3, num_classes=len(DOTA_CLASSES),
-                 roi_pool_size=7, roi_mid_channels=1024):
+                 roi_pool_size=7, roi_mid_channels=512, roi_reduce_channels=256,
+                 precomputed_features=False):
         super(Detector, self).__init__()
         # path2ijepa is stored as a hyperparameter so the detector can be rebuilt
         # from a checkpoint; the backbone weights themselves are saved with it.
@@ -218,6 +233,11 @@ class Detector(L.LightningModule):
 
         self.lr = lr
         self.num_classes = num_classes
+        # when True, training/eval batches already carry the (B, D, grid, grid)
+        # backbone feature map (see FeatureDataset) so _shared_step skips the
+        # frozen encoder entirely. The encoder is still loaded below for the raw
+        # image forward() / predict path.
+        self.precomputed_features = precomputed_features
         self.class_to_idx = {name: i for i, name in enumerate(DOTA_CLASSES[:num_classes])}
 
         # backbone: frozen I-JEPA target encoder (the stable EMA representation)
@@ -231,14 +251,15 @@ class Detector(L.LightningModule):
         self.patch_size = int(self.target_encoder.patch_size)   # 16
         self.grid = self.image_size // self.patch_size          # 14 tokens per side
 
-        # stage 1: RPN over the ViT feature grid. Its stride (in image pixels) is
+        # RPN over the ViT feature grid. Its stride (in image pixels) is
         # the patch size, since each token summarizes one patch.
         self.rpn = RPN(in_channels=D, stride=self.patch_size)
 
-        # stage 2: ROI classification + box refinement on the same feature map
+        # ROI classification + box refinement on the same feature map
         self.roi_head = ROIHead(in_channels=D, num_classes=num_classes,
                                 spatial_scale=1.0 / self.patch_size,
-                                pool_size=roi_pool_size, mid_channels=roi_mid_channels)
+                                pool_size=roi_pool_size, mid_channels=roi_mid_channels,
+                                reduce_channels=roi_reduce_channels)
 
         # COCO-style mAP, accumulated across the whole test epoch (a per-batch
         # value would be meaningless: AP is an area under a precision/recall
@@ -303,22 +324,26 @@ class Detector(L.LightningModule):
         terms. The RPN proposals feeding stage 2 are generated under no_grad, so
         the two stages are trained jointly but the ROI gradients do not flow back
         into the proposal boxes (the usual Faster R-CNN approximation).
-        :param batch: (images, boxes, labels, difficulties) from collate_fn
+        :param batch: (inputs, boxes, labels, difficulties). inputs are raw
+                      images (B, 3, H, W) from collate_fn, or already the
+                      (B, D, grid, grid) feature map from feature_collate_fn when
+                      self.precomputed_features is set.
         :param detect: also run inference-time postprocessing, reusing the
                        feature map and proposals already computed here so
                        evaluation costs one extra ROI pass, not a second forward
         :return: (total_loss, loss_dict, detections|None, targets|None)
         '''
-        images, boxes, labels, _ = batch
+        inputs, boxes, labels, _ = batch
         image_size = (self.image_size, self.image_size)
-        feat = self._extract_feature_map(images)                 # (B, D, H, W)
-        gt_boxes, gt_labels = self._prepare_targets(boxes, labels, images.device)
+        # cached path feeds the feature map directly; otherwise run the backbone
+        feat = inputs if self.precomputed_features else self._extract_feature_map(inputs)
+        gt_boxes, gt_labels = self._prepare_targets(boxes, labels, feat.device)
 
-        # ---- stage 1
+        # stage 1 pushing through RPN
         objectness, deltas, anchors = self.rpn(feat)
         losses = self.rpn.loss(objectness, deltas, anchors, gt_boxes)
 
-        # ---- stage 2
+        # stage 2 pushing through ROI head
         proposals = [p["boxes"] for p in
                      self.rpn.proposals(objectness, deltas, anchors, image_size)]
         # append the ground truth so the head sees clean positives from step one

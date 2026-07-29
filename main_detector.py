@@ -13,12 +13,15 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="configs/config_detector.yaml")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch_size", type=int)
-    parser.add_argument("--lr", type=float, help="peak learning rate reached at the end of warmup")
+    parser.add_argument("--lr", type=float)
     parser.add_argument('--img_height', type=int)
     parser.add_argument('--img_width', type=int)
     parser.add_argument("--train", action="store_true", default=False)
     parser.add_argument("--test", action="store_true", default=False)
     parser.add_argument("--predict", action="store_true", default=False)
+    parser.add_argument("--use_features", action="store_true", default=False,
+                        help="train/test on precomputed backbone features "
+                             "(scripts/cache_features.py) instead of raw images")
     parser.add_argument("--image", default=None, help="path to a single image to run --predict on")
     parser.add_argument("--score_thr", type=float, default=0.5,
                         help="minimum class score for a detection to be printed/drawn")
@@ -44,6 +47,7 @@ if __name__ == "__main__":
         model = Detector(
             path2ijepa=config["model"]["path2ijepa"],
             lr=config["training"]["lr"],
+            precomputed_features=args.use_features,
         )
 
         trainer.fit(model, train_loader, val_loader)
@@ -57,6 +61,9 @@ if __name__ == "__main__":
                                 training=False)
 
         model = Detector.load_from_checkpoint(args.ckpt)
+        # test batches come from a feature or image loader independently of how
+        # the checkpoint was trained, so set the mode from the CLI flag here
+        model.precomputed_features = args.use_features
         model.eval()
 
         trainer.test(model, test_loader)

@@ -31,7 +31,6 @@ def build_trainer(log_dir: str, log_name: str, log_version: str=None, ckpt_dir: 
         save_last=True,
         every_n_epochs=1,
     )
-    device_stats_callback = DeviceStatsMonitor()
     lr_monitor_callback = LearningRateMonitor(logging_interval="epoch")
 
     trainer = L.Trainer(
@@ -40,7 +39,7 @@ def build_trainer(log_dir: str, log_name: str, log_version: str=None, ckpt_dir: 
         max_epochs=max_epochs,
         log_every_n_steps=10,
         enable_progress_bar=False,
-        callbacks=[checkpoint_callback, device_stats_callback, lr_monitor_callback],
+        callbacks=[checkpoint_callback, lr_monitor_callback],
     )
 
     return trainer
