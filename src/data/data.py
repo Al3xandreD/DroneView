@@ -61,11 +61,11 @@ def get_feature_dataloaders(args, config):
                           persistent_workers=True)
 
     if args.train:
-        loaders['train'] = make('train', shuffle=True)
-        loaders['val'] = make('val', shuffle=False)
+        loaders['train'] = make('Train', shuffle=True)
+        loaders['val'] = make('Val', shuffle=False)
     if args.test:
         # DOTA's test split has no public boxes; evaluate on the val cache
-        loaders['test'] = make('val', shuffle=False)
+        loaders['test'] = make('Val', shuffle=False)
     return loaders
 
 def get_dataloaders(args, config):

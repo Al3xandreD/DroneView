@@ -19,3 +19,8 @@ training:
   batch_size: 32
   lr: 0.0001
   num_workers: 2
+  # cpu, not mps: torchvision's roi_align has a pathological MPS kernel (backward
+  # measured ~10x slower than CPU on an M1 Pro) and the heads are small, so the
+  # cached-feature training path runs ~10x faster on the CPU. Feature extraction
+  # (scripts/cache_features.py) still uses the GPU, where the ViT dominates.
+  accelerator: cpu

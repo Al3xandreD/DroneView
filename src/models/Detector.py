@@ -24,7 +24,7 @@ class ROIHead(nn.Module):
     Where the RPN answers "is there *something* here", this head answers "what
     is it, and where exactly". The shared feature map is first passed through a
     1x1 conv that projects the backbone's in_channels (768) down to
-    reduce_channels (256): the flattened ROI vector fed to the MLP is
+    reduce_channels: the flattened ROI vector fed to the MLP is
     reduce_channels * pool_size**2 wide, so this projection shrinks the first
     Linear (by far the head's largest layer) by the same factor, and it runs
     once per image on the 14x14 map rather than once per proposal.
@@ -32,7 +32,17 @@ class ROIHead(nn.Module):
     Each proposal is then pooled from that reduced map into a fixed
     pool_size x pool_size patch (so a variable number of variably-sized boxes
     becomes a fixed-width tensor an MLP can consume), flattened, and pushed
-    through a two-layer MLP with two sibling linear heads:
+    through a two-layer MLP.
+
+    reduce_channels * pool_size**2 is that flattened width, and it sets the cost
+    of the whole head: the first Linear is evaluated once per sampled proposal
+    (num_samples * batch rows per step), which makes it the dominant matmul of a
+    training step. The defaults here (5 / 128) are deliberately below
+    torchvision's (7 / 256) because those assume an FPN pyramid. Here a single
+    stride-16 map feeds ROIs that are almost all under two cells wide, so a 7x7
+    grid is largely bilinear upsampling of one feature value.
+
+    The MLP ends in two sibling linear heads:
       - cls_score: (C + 1) logits, background at index 0
       - bbox_pred: 4 deltas *per class*, so the refinement can be
         category-specific (a harbor and a small-vehicle are not adjusted alike)
@@ -42,9 +52,9 @@ class ROIHead(nn.Module):
     '''
 
     def __init__(self, in_channels, num_classes, spatial_scale,
-                 pool_size=7, mid_channels=512, reduce_channels=256,
+                 pool_size=5, mid_channels=512, reduce_channels=128,
                  # training-time proposal assignment / sampling
-                 fg_iou_thr=0.5, num_samples=512, pos_fraction=0.25,
+                 fg_iou_thr=0.5, num_samples=128, pos_fraction=0.25,
                  # inference-time filtering
                  score_thr=0.05, nms_thr=0.5, detections_per_img=100):
         super().__init__()
@@ -224,7 +234,7 @@ class Detector(L.LightningModule):
     '''
 
     def __init__(self, path2ijepa, lr=1e-3, num_classes=len(DOTA_CLASSES),
-                 roi_pool_size=7, roi_mid_channels=512, roi_reduce_channels=256,
+                 roi_pool_size=5, roi_mid_channels=512, roi_reduce_channels=128,
                  precomputed_features=False):
         super(Detector, self).__init__()
         # path2ijepa is stored as a hyperparameter so the detector can be rebuilt
@@ -286,8 +296,8 @@ class Detector(L.LightningModule):
         '''
         Convert one batch of raw annotations into ROI-head targets: oriented
         8-coord boxes become axis-aligned, class-name strings become indices.
-        :param boxes: list (len B) of (G_i, 8), :param labels: list (len B) of
-                      lists of DOTA class-name strings
+        :param boxes: list (len B) of (G_i, 8),
+        :param labels: list (len B) of lists of DOTA class-name strings
         :return: (gt_boxes list of (G_i,4), gt_labels list of (G_i,) long)
         '''
         gt_boxes = [poly8_to_aabb(b.to(device)) for b in boxes]
@@ -327,7 +337,7 @@ class Detector(L.LightningModule):
         :param batch: (inputs, boxes, labels, difficulties). inputs are raw
                       images (B, 3, H, W) from collate_fn, or already the
                       (B, D, grid, grid) feature map from feature_collate_fn when
-                      self.precomputed_features is set.
+                      self.feature_cache is set.
         :param detect: also run inference-time postprocessing, reusing the
                        feature map and proposals already computed here so
                        evaluation costs one extra ROI pass, not a second forward
@@ -425,6 +435,43 @@ class Detector(L.LightningModule):
         params = [p for p in self.parameters() if p.requires_grad]
         return torch.optim.AdamW(params, lr=self.lr)
 
+    # ------------------------------------------------------------ checkpointing
+    _BACKBONE_PREFIX = "target_encoder."
+
+    def on_save_checkpoint(self, checkpoint):
+        '''
+        Drop the frozen backbone from the saved state dict.
+
+        target_encoder is a verbatim copy of the I-JEPA target encoder: it never
+        receives a gradient and never enters the optimizer, so writing its ~86M
+        parameters into every checkpoint costs a few hundred MB per file to store
+        bytes __init__ already reloads from path2ijepa. Only the RPN and ROI head
+        actually change during training.
+
+        This adds no new dependency on the I-JEPA file: __init__ reads it
+        unconditionally, so a Detector checkpoint was never loadable without it.
+        '''
+        state = checkpoint["state_dict"]
+        for key in [k for k in state if k.startswith(self._BACKBONE_PREFIX)]:
+            del state[key]
+
+    def on_load_checkpoint(self, checkpoint):
+        '''
+        Put back what on_save_checkpoint stripped.
+
+        Lightning runs this after __init__ has already rebuilt target_encoder
+        from path2ijepa, so the live module holds the correct weights; copying
+        them into the incoming state dict simply lets load_state_dict stay
+        strict, which keeps a genuinely missing *head* tensor an error rather
+        than a silent zero-init. Checkpoints written before this change still
+        carry the backbone and are left untouched.
+        '''
+        state = checkpoint["state_dict"]
+        if any(k.startswith(self._BACKBONE_PREFIX) for k in state):
+            return          # pre-stripping checkpoint: backbone already present
+        for key, value in self.target_encoder.state_dict().items():
+            state[self._BACKBONE_PREFIX + key] = value
+
 
 class RPN(L.LightningModule):
     '''
@@ -445,8 +492,13 @@ class RPN(L.LightningModule):
                  mid_channels=256,
                  # training-time anchor assignment / sampling
                  pos_iou_thr=0.7, neg_iou_thr=0.3, num_samples=256, pos_fraction=0.5,
-                 # proposal generation
-                 pre_nms_topk=2000, post_nms_topk=1000, nms_thr=0.7, min_size=4):
+                 # proposal generation. This map has only grid**2 * A = 196 * 12 =
+                 # 2352 anchors in total, so torchvision's 2000/1000 defaults (sized
+                 # for ~200k FPN anchors) would keep 85% of all anchors and hand the
+                 # ROI head ~1000 proposals per image. 600/300 keeps the shortlist
+                 # proportionate to the anchor set and cuts the cost of the
+                 # per-proposal IoU and pooling downstream.
+                 pre_nms_topk=600, post_nms_topk=300, nms_thr=0.7, min_size=4):
         super().__init__()
         self.save_hyperparameters()
 
@@ -585,8 +637,8 @@ class RPN(L.LightningModule):
         iou = box_iou(anchors, gt)                          # (M, G), iou score between anchors and gt
         max_iou, matched = iou.max(dim=1)                   # best gt per anchor
         labels = anchors.new_full((M,), -1, dtype=torch.long)
-        labels[max_iou < self.neg_iou_thr] = 0
-        labels[max_iou >= self.pos_iou_thr] = 1
+        labels[max_iou < self.neg_iou_thr] = 0 # considered background
+        labels[max_iou >= self.pos_iou_thr] = 1  # considered object
 
         # force the best anchor(s) for each gt to be positive
         gt_best = iou.max(dim=0).values                     # (G,)

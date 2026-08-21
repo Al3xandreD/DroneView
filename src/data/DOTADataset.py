@@ -34,7 +34,7 @@ class DOTADataset(Dataset):
         annotation_name = os.path.splitext(image_name)[0] + '.txt'
         annotation_path = os.path.join(self.annotation_path, annotation_name)
 
-        boxes, labels, difficulties = self.parse_annotation(annotation_path)
+        boxes, labels, difficulties = parse_annotation(annotation_path)
         boxes = tensor(boxes, dtype=float32).reshape(-1, 8) # reshape keeps images with no annotations as (0, 8) instead of (0,)
 
 
@@ -51,37 +51,37 @@ class DOTADataset(Dataset):
         return len(self.image_files)
 
 
-    def parse_annotation(self, annotation_path):
-        boxes, labels, difficulties = [], [], []
+def parse_annotation(annotation_path):
+    boxes, labels, difficulties = [], [], []
 
-        with open(annotation_path, 'r') as f:   # opening file
-            lines = f.readlines()
+    with open(annotation_path, 'r') as f:   # opening file
+        lines = f.readlines()
 
-        for line in lines:  # discarding metadata
-            if line.startswith('imagesource') or line.startswith('gsd'):
-                continue
+    for line in lines:  # discarding metadata
+        if line.startswith('imagesource') or line.startswith('gsd'):
+            continue
 
-            parts = line.strip().split()
-            if len(parts) < 10:
-                continue
+        parts = line.strip().split()
+        if len(parts) < 10:
+            continue
 
-            # 8 coordinates + class + difficulty
-            coords = list(map(float, parts[:8]))
-            label = parts[8]
-            difficulty = int(parts[9])
+        # 8 coordinates + class + difficulty
+        coords = list(map(float, parts[:8]))
+        label = parts[8]
+        difficulty = int(parts[9])
 
-            boxes.append(coords)
-            labels.append(label)
-            difficulties.append(difficulty)
+        boxes.append(coords)
+        labels.append(label)
+        difficulties.append(difficulty)
 
-        return boxes, labels, difficulties
+    return boxes, labels, difficulties
 
 if __name__ == '__main__':
     annotation_path = DATA / "Train/labelTxt-v1.5/DOTA-v1.5_train"
     images_dir = DATA / "Train/images"
     image_size = (1024, 1024)
 
-    dataset = DOTADataset(annotation_path, images_dir)
+    dataset = DOTADataset(annotation_path, images_dir, (500, 500))
 
     batch_size = 1
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)

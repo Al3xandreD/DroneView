@@ -1,6 +1,9 @@
 import torch
 from matplotlib import pyplot as plt
+from matplotlib.colors import to_hex
 from torchvision.utils import draw_bounding_boxes
+
+from src.utils.utils_training import select_detections, selection_desc
 
 
 def plot_boxes(image, boxes, label):
@@ -9,31 +12,50 @@ def plot_boxes(image, boxes, label):
     plt.title(f"Train Image using ground truth bounding boxes")
     plt.show()
 
-def plot_detections(image, detection, class_names, score_thr=0.5, title=None):
+def plot_detections(image, detection, class_names, score_thr=None, top_k=None,
+                    title=None, max_labels=25):
     '''
-    Draw the Detector's output for a single image: axis-aligned boxes annotated
-    with "class score". Detections below score_thr are hidden, since the ROI head
-    emits up to detections_per_img boxes and most of them are low-confidence.
+    Draw the Detector's output for a single image: axis-aligned boxes colored per
+    class.
+
+    The detector returns a variable number of boxes (the RPN proposes as many
+    regions as survive its objectness top-k and NMS), so nothing here assumes a
+    fixed count. Detections arrive already scored, suppressed and score-ordered by
+    ROIHead.postprocess; select_detections only applies the optional *display*
+    cut, and by default nothing is hidden.
+
+    Two concessions to crowded frames: colors are per class so overlapping
+    categories stay distinguishable, and once more than max_labels boxes are drawn
+    the text tags are dropped (the boxes all stay) rather than silently dropping
+    detections to keep the frame readable.
     :param image: (C, H, W) float tensor in [0, 1], as produced by the transforms
     :param detection: dict {'boxes': (K,4), 'scores': (K,), 'labels': (K,)}
     :param class_names: sequence indexed by the label ids
+    :param score_thr: display score floor, or None to draw the full tail
+    :param top_k: draw at most this many highest-scoring detections, or None
+    :param max_labels: above this many boxes, draw them untagged
     '''
     image = (image.detach().cpu().clamp(0, 1) * 255).to(torch.uint8)
-    boxes = detection['boxes'].detach().cpu()
-    scores = detection['scores'].detach().cpu()
-    labels = detection['labels'].detach().cpu()
-
-    keep = scores >= score_thr
-    boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
+    boxes, scores, labels, n_returned = select_detections(detection, score_thr, top_k)
+    desc = selection_desc(score_thr, top_k)
 
     if boxes.numel() == 0:
         plt.imshow(image.permute(1, 2, 0).numpy())
-        plt.title(title or f"No detection above {score_thr}")
+        plt.title(title or f"no detections drawn of {n_returned} returned ({desc})")
     else:
-        tags = [f"{class_names[l]} {s:.2f}" for l, s in zip(labels.tolist(), scores.tolist())]
-        drawn = draw_bounding_boxes(image, boxes, labels=tags, colors="red", width=2)
+        # stable per-class colors: same class -> same color across images
+        cmap = plt.get_cmap('tab20')
+        colors = [to_hex(cmap(int(l) % 20)) for l in labels.tolist()]
+
+        tags = None
+        if boxes.shape[0] <= max_labels:
+            tags = [f"{class_names[l]} {s:.2f}"
+                    for l, s in zip(labels.tolist(), scores.tolist())]
+
+        drawn = draw_bounding_boxes(image, boxes, labels=tags, colors=colors, width=2)
         plt.imshow(drawn.permute(1, 2, 0).numpy())
-        plt.title(title or f"{boxes.shape[0]} detections (score >= {score_thr})")
+        plt.title(title or f"{boxes.shape[0]} of {n_returned} detections "
+                           f"({desc}, {scores.min():.2f}-{scores.max():.2f})")
     plt.axis('off')
     plt.show()
 

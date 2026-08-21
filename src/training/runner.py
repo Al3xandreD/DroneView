@@ -4,13 +4,21 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, DeviceStatsMonitor, LearningRateMonitor
 
 def build_trainer(log_dir: str, log_name: str, log_version: str=None, ckpt_dir: str = None, ckpt_name: str = None,
-                  max_epochs=None, training: bool = False):
+                  max_epochs=None, training: bool = False, accelerator: str = "auto"):
     '''
     Shared runner function
     :param ckpt_name:
     :param log_dir: path to the tensorboard logger directory
     :param ckpt_dir: path to the checkpoint directory
     :param training: train boolean
+    :param accelerator: Lightning accelerator. "auto" picks MPS on Apple Silicon,
+        which is *not* always the fast choice here: torchvision's roi_align has a
+        pathological MPS kernel (its cost barely varies with ROI count, and its
+        backward measured ~10x slower than CPU on an M1 Pro), and the detection
+        heads are small enough that the CPU wins outright. Prefer "cpu" for the
+        heads-only / precomputed-feature path; "auto" or "mps" still makes sense
+        for the backbone-bound path (scripts/cache_features.py), where the ViT
+        forward dominates and runs well on the GPU.
     :return:
     '''
     logger = TensorBoardLogger(
@@ -20,7 +28,7 @@ def build_trainer(log_dir: str, log_name: str, log_version: str=None, ckpt_dir: 
     )
 
     if not training:
-        return L.Trainer(accelerator="auto",logger=logger)
+        return L.Trainer(accelerator=accelerator, logger=logger)
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=ckpt_dir,
@@ -34,7 +42,7 @@ def build_trainer(log_dir: str, log_name: str, log_version: str=None, ckpt_dir: 
     lr_monitor_callback = LearningRateMonitor(logging_interval="epoch")
 
     trainer = L.Trainer(
-        accelerator='auto',
+        accelerator=accelerator,
         logger=logger,
         max_epochs=max_epochs,
         log_every_n_steps=10,
