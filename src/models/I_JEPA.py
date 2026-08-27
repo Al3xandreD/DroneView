@@ -9,11 +9,12 @@ from torchvision.models import vit_b_16
 
 class IJEPA(L.LightningModule):
     def __init__(self, M, lr=1e-3, warmup_start_lr=1e-4, final_lr=1e-6, warmup_epochs=5,
-                 ema_momentum=0.996, target_scale=(0.15, 0.2), target_ratio=(0.75, 1.5), context_scale=(0.85, 1.0)):
+                 ema_momentum=0.996, target_scale=(0.15, 0.2), target_ratio=(0.75, 1.5), context_scale=(0.85, 1.0),
+                 tiler = None):
         super(IJEPA, self).__init__()
         # saving the constructor args as hyperparameters so the model can be
         # rebuilt with IJEPA.load_from_checkpoint(...)
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['tiler'])
         # attributes
         self.M = M # number of sampled targets
         self.lr = lr # peak learning rate reached at the end of warmup
@@ -32,6 +33,9 @@ class IJEPA(L.LightningModule):
         self.predictor = vit_b_16()
 
         dim = self.context_encoder.hidden_dim
+
+        # image tiler
+        self.tiler = tiler
 
         # learnable mask token used by the predictor for the patches to predict
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dim))
@@ -120,44 +124,63 @@ class IJEPA(L.LightningModule):
         device = y.device
         B = y.shape[0]
 
-        # dividing input in patches
-        gh = gw = self.target_encoder.image_size//self.target_encoder.patch_size
-        N = gh*gw # number of patches
+        def _step(y):
+            # dividing input in patches
+            gh = gw = self.target_encoder.image_size//self.target_encoder.patch_size
+            N = gh*gw # number of patches
 
-        with torch.no_grad():
-            # target encoder side
-            target_patches = self._embed(self.target_encoder, y) # patches out of the encoder
-            s_y = self._transformer(self.target_encoder, target_patches) # representation out of vit
-            idx_target = self._block_indices(gh, gw, self.target_scale, self.target_ratio) # indices of sampled M target patches in the blocks
-            idx_target = torch.cat(idx_target, dim=0).unique(dim=0).to(device) # union of all target patch indices
-            sampled_y = s_y[:, idx_target] # (B, n_target, D) sampled block representations to predict
+            with torch.no_grad():
+                # target encoder side
+                target_patches = self._embed(self.target_encoder, y) # patches out of the encoder
+                s_y = self._transformer(self.target_encoder, target_patches) # representation out of vit
+                idx_target = self._block_indices(gh, gw, self.target_scale, self.target_ratio) # indices of sampled M target patches in the blocks
+                idx_target = torch.cat(idx_target, dim=0).unique(dim=0).to(device) # union of all target patch indices
+                sampled_y = s_y[:, idx_target] # (B, n_target, D) sampled block representations to predict
 
-            # sampling one context block and removing the target patches from it
-            idx_context = self._get1block_indices(gh, gw, self.context_scale, self.context_ratio)
-            keep = torch.zeros(N, dtype=torch.bool) # mask of patches kept in the context
-            keep[idx_context] = True
-            keep[idx_target.cpu()] = False
-            idx_context = torch.nonzero(keep).squeeze(1).to(device)
+                # sampling one context block and removing the target patches from it
+                idx_context = self._get1block_indices(gh, gw, self.context_scale, self.context_ratio)
+                keep = torch.zeros(N, dtype=torch.bool) # mask of patches kept in the context
+                keep[idx_context] = True
+                keep[idx_target.cpu()] = False
+                idx_context = torch.nonzero(keep).squeeze(1).to(device)
 
-        # context encoder side
-        context_patches = self._embed(self.context_encoder, y)  # (B, N, D)
-        context_patches = context_patches[:, idx_context]       # (B, n_context, D)
-        s_x = self._transformer(self.context_encoder, context_patches)
+            # context encoder side
+            context_patches = self._embed(self.context_encoder, y)  # (B, N, D)
+            context_patches = context_patches[:, idx_context]       # (B, n_context, D)
+            s_x = self._transformer(self.context_encoder, context_patches)
 
-        # predict the target representations from the context
-        pos = self.predictor.encoder.pos_embedding[:, 1:, :] # (1, N, D) predictor position embeddings
-        n_target = idx_target.shape[0]
+            # predict the target representations from the context
+            pos = self.predictor.encoder.pos_embedding[:, 1:, :] # (1, N, D) predictor position embeddings
+            n_target = idx_target.shape[0]
 
-        ctx = s_x + pos[:, idx_context, :]                                     # context tokens + their positions
-        mask = self.mask_token.expand(B, n_target, -1) + pos[:, idx_target, :] # mask tokens at the target positions
+            ctx = s_x + pos[:, idx_context, :]                                     # context tokens + their positions
+            mask = self.mask_token.expand(B, n_target, -1) + pos[:, idx_target, :] # mask tokens at the target positions
 
-        seq = torch.cat([ctx, mask], dim=1)          # (B, n_context + n_target, D)
-        seq = self._transformer(self.predictor, seq)
-        pred_y = seq[:, -n_target:]                   # (B, n_target, D) predicted target representations
+            seq = torch.cat([ctx, mask], dim=1)          # (B, n_context + n_target, D)
+            seq = self._transformer(self.predictor, seq)
+            pred_y = seq[:, -n_target:]                   # (B, n_target, D) predicted target representations
 
-        # mean L2 distance between predictions and the frozen target representations
-        loss = nn.functional.mse_loss(pred_y, sampled_y)
-        return loss
+            # mean L2 distance between predictions and the frozen target representations
+            loss = nn.functional.mse_loss(pred_y, sampled_y)
+            return loss
+
+        # if tiling
+        if self.tiler:
+
+            tiles = self.tiler(y) # (B, C, L, P, P)
+            B, C, L, P, _ = tiles.shape
+            assert tiles.shape[-1] == self.target_encoder.image_size, (
+                f"tile size {tiles.shape[-1]} != encoder image_size {self.target_encoder.image_size}"
+            ) # tiles shape must be equal to target encoder image size
+            tiles = tiles.permute(0, 2, 1, 3, 4) # batching the tiles
+            tiles = tiles.reshape(B*L, C, P, P)
+
+            loss = _step(tiles)
+            return loss
+
+        else:
+            loss = _step(y)
+            return loss
 
     def training_step(self, batch, batch_idx):
         '''

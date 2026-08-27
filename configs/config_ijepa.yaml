@@ -2,9 +2,6 @@ model:
   embed_dim: 768
   M: 4
 
-detector:
-  path2ijepa: "models.nosync/ijepa_checkpoints/ijepa-epoch=37-val_loss=0.0000.ckpt"
-
 data:
   train:
     image_path: "data.nosync/Train/images"
@@ -24,3 +21,6 @@ training:
   lr: 0.001          # peak learning rate reached at the end of warmup
   warmup_epochs: 5   # epochs to linearly ramp lr from warmup_start_lr up to lr
   num_workers: 2
+
+mlflow:
+  tracking_uri: "file:./outputs.nosync/mlf_runs"

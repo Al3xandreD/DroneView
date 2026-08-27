@@ -13,10 +13,10 @@ class Tiler(nn.Module):
     Creates a tiler model to tile the dota dataset
     '''
 
-    def __init__(self, patch_size=(224, 224)):
+    def __init__(self, tile_size=(224, 224)):
         super().__init__()
-        self.patch_size = patch_size
-        self.unfold = Unfold(kernel_size=patch_size, stride=patch_size)
+        self.patch_size = tile_size
+        self.unfold = Unfold(kernel_size=tile_size, stride=tile_size)
 
 
     def forward(self, image):
